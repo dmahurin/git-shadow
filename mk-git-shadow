@@ -1,0 +1,37 @@
+#!/bin/sh -xe
+
+# Create a shadow git directory that references the current directory and .git.
+
+git_dir_ref="$1"
+if [ -z "$git_dir_ref" -o "$git_dir_ref" = ".git" ]; then
+  echo "Usage: $0 <git-dir-ref-file>" >&2
+  exit 2
+fi
+git_dir="${git_dir_ref}_"
+
+mkdir -p "$git_dir"
+
+# point objects alternates to the real .git objects
+mkdir -p "$git_dir"/objects/info
+echo '../../.git/objects' > "$git_dir"/objects/info/alternates
+
+# copy HEAD and update refs.
+cp -a .git/HEAD "$git_dir"/HEAD
+branch=`git --git-dir=.git branch --show-current`
+mkdir -p "$git_dir"/refs/heads
+git --git-dir="$git_dir" update-ref refs/heads/"$branch" $(git --git-dir=.git rev-parse "$branch")
+
+# Copy config and remove any remotes in the shadow git dir
+cp .git/config "$git_dir"/config
+git --git-dir="$git_dir" remote | xargs -r -n1 git --git-dir="$git_dir" remote remove
+
+# Create worktree for current directory.
+mkdir -p "$git_dir"/worktrees/current
+cp .git/HEAD "$git_dir"/worktrees/current/HEAD
+echo '../..' > "$git_dir"/worktrees/current/commondir 
+
+# Create the gitdir file that points to the shadow worktree.
+echo "gitdir: $git_dir/worktrees/current" > "$git_dir_ref"
+
+# Reset using the new gitdir ref.
+git --git-dir="$git_dir_ref" reset
