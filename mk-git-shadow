@@ -19,7 +19,7 @@ echo '../../.git/objects' > "$git_dir"/objects/info/alternates
 cp -a .git/HEAD "$git_dir"/HEAD
 branch=`git --git-dir=.git branch --show-current`
 mkdir -p "$git_dir"/refs/heads
-[ -z "$branch" ] || git --git-dir="$git_dir" update-ref refs/heads/"$branch" $(git --git-dir=.git rev-parse "$branch")
+[ -z "$branch" -o ! -e .git/refs/heads/"$branch" ] || git --git-dir="$git_dir" update-ref refs/heads/"$branch" $(git --git-dir=.git rev-parse "$branch")
 
 # Copy config and remove any remotes in the shadow git dir
 cp .git/config "$git_dir"/config
