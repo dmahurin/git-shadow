@@ -1,6 +1,6 @@
 # mk-git-shadow
 
-`mk-git-shadow` is a small shell script that creates a *shadow* Git repository. It sets up a new git directory that **inherits objects from the current repository** via Git’s *alternates* feature and creates a worktree that points back to the current working directory.
+`mk-git-shadow` is a script that creates a *shadow* Git repository. It sets up a new git directory that **inherits objects from the current repository** via Git’s *alternates* feature and creates a worktree that points back to the current working directory.
 
 This is useful in sandboxed or restricted environments where direct writes to the `.git` directory are prohibited or not desired. The shadow repository shares objects with the original repository while keeping its own history and configuration.
 

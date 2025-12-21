@@ -1,37 +1,117 @@
-#!/bin/sh -e
+#!/usr/bin/env python3
+"""Python implementation of the original mk-git-shadow shell script.
 
-# Create a shadow git directory that references the current directory and .git.
+This script creates a *shadow* Git repository that inherits objects from the
+current repository via Git’s *alternates* feature and creates a worktree that
+points back to the current working directory. The behaviour matches the
+original shell script found in ``mk-git-shadow``.
 
-git_dir_ref="$1"
-if [ -z "$git_dir_ref" -o "$git_dir_ref" = ".git" ]; then
-  echo "Usage: $0 <git-dir-ref-file>" >&2
-  exit 2
-fi
-git_dir="${git_dir_ref}_"
+Usage::
 
-mkdir -p "$git_dir"
+    python3 mk-git-shadow.py <git-dir-ref-file>
 
-# point objects alternates to the real .git objects
-mkdir -p "$git_dir"/objects/info
-echo '../../.git/objects' > "$git_dir"/objects/info/alternates
+Where ``<git-dir-ref-file>`` is the path to the file that will contain a
+``gitdir: <path>`` line pointing to the new worktree.
 
-# copy HEAD and update refs.
-cp -a .git/HEAD "$git_dir"/HEAD
-branch=`git --git-dir=.git branch --show-current`
-mkdir -p "$git_dir"/refs/heads
-[ -z "$branch" -o ! -e .git/refs/heads/"$branch" ] || git --git-dir="$git_dir" update-ref refs/heads/"$branch" $(git --git-dir=.git rev-parse "$branch")
+The script performs the following steps:
 
-# Copy config and remove any remotes in the shadow git dir
-cp .git/config "$git_dir"/config
-git --git-dir="$git_dir" remote | xargs -r -n1 git --git-dir="$git_dir" remote remove
+1. Validate the argument.
+2. Create a new directory ``<git-dir-ref>_``.
+3. Configure the objects alternates to use the current repository’s objects.
+4. Copy ``HEAD`` and, if present, the current branch reference.
+5. Copy the configuration and remove any remote entries.
+6. Create a worktree that points to the current directory.
+7. Write the gitdir file and reset the repository.
+"""
 
-# Create worktree for current directory.
-mkdir -p "$git_dir"/worktrees/current
-cp .git/HEAD "$git_dir"/worktrees/current/HEAD
-echo '../..' > "$git_dir"/worktrees/current/commondir 
+from __future__ import annotations
 
-# Create the gitdir file that points to the shadow worktree.
-echo "gitdir: $git_dir/worktrees/current" > "$git_dir_ref"
+import os
+import sys
+import subprocess
+from pathlib import Path
+import shutil
 
-# Reset using the new gitdir ref.
-git --git-dir="$git_dir_ref" reset
+
+def run(cmd: list[str], *, check: bool = True, capture_output: bool = False, **kwargs) -> subprocess.CompletedProcess:
+    """Convenience wrapper around :func:`subprocess.run`.
+
+    Parameters
+    ----------
+    cmd:
+        Command and arguments to execute.
+    check:
+        If ``True`` (default) ``CalledProcessError`` is raised on non‑zero
+        returncode.
+    capture_output:
+        If ``True`` the command’s stdout/stderr are captured.
+    """
+    return subprocess.run(cmd, check=check, capture_output=capture_output, text=True, **kwargs)
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) != 1:
+        print("Usage: mk-git-shadow.py <git-dir-ref-file>", file=sys.stderr)
+        sys.exit(2)
+
+    git_dir_ref = Path(argv[0]).resolve()
+    if git_dir_ref.name == ".git":
+        print("Error: git-dir-ref cannot be .git", file=sys.stderr)
+        sys.exit(2)
+
+    # The shadow git directory is <git_dir_ref>_.
+    git_dir = git_dir_ref.with_name(git_dir_ref.name + "_")
+    git_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Point objects alternates to the real .git objects
+    (git_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    alternates_file = git_dir / "objects" / "info" / "alternates"
+    alternates_file.write_text("../../.git/objects\n")
+
+    # 2. Copy HEAD
+    shutil.copy2(Path(".git") / "HEAD", git_dir / "HEAD")
+
+    # 3. Get current branch
+    try:
+        branch = run(["git", "--git-dir", ".git", "branch", "--show-current"], capture_output=True).stdout.strip()
+    except subprocess.CalledProcessError:
+        branch = ""
+
+    # 4. Copy current branch ref if it exists
+    if branch:
+        current_ref = Path(".git") / "refs" / "heads" / branch
+        if current_ref.is_file():
+            git_dir_ref_head = git_dir / "refs" / "heads"
+            git_dir_ref_head.mkdir(parents=True, exist_ok=True)
+            rev = run(["git", "--git-dir", ".git", "rev-parse", branch], capture_output=True).stdout.strip()
+            run(["git", "--git-dir", str(git_dir), "update-ref", f"refs/heads/{branch}", rev])
+
+    # 5. Copy config and remove remotes
+    shutil.copy2(Path(".git") / "config", git_dir / "config")
+    # List remotes and remove them
+    try:
+        remotes = run(["git", "--git-dir", str(git_dir), "remote"], capture_output=True).stdout.splitlines()
+        for r in remotes:
+            if r:
+                run(["git", "--git-dir", str(git_dir), "remote", "remove", r])
+    except subprocess.CalledProcessError:
+        pass
+
+    # 6. Create worktree for current directory
+    worktree_dir = git_dir / "worktrees" / "current"
+    worktree_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(".git") / "HEAD", worktree_dir / "HEAD")
+    (worktree_dir / "commondir").write_text("../..\n")
+
+    # 7. Write the gitdir file
+    git_dir_ref.write_text(f"gitdir: {worktree_dir}\n")
+
+    # 8. Reset using the new gitdir ref
+    run(["git", "--git-dir", str(git_dir_ref), "reset"])
+
+    print(f"Shadow repository created at {git_dir_ref}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
