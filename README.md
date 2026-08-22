@@ -28,6 +28,8 @@ This creates two entries:
 - `.xgit` is a small gitdir file used with `GIT_DIR` or `--git-dir`.
 - `.xgit_` contains the writable shadow repository metadata.
 
+Both paths must be new and must not be inside the source repository's Git metadata directory. Creation is staged so a failure does not leave either requested path partially populated.
+
 Once the shadow repository is created you can run Git commands against it by setting the `GIT_DIR` environment variable (or using the `--git-dir` option). For example:
 
 ```sh
@@ -45,6 +47,8 @@ git pull .xgit
 ```
 
 The shadow repository depends on the original repository's object database. It is not independently portable, and the original repository must remain available for the shadow to work.
+
+The source configuration is copied, but remotes and configuration include directives are removed so external configuration cannot reintroduce source remotes.
 
 ## Use with OpenAI Codex
 

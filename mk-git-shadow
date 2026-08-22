@@ -20,6 +20,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -53,6 +54,29 @@ def git_path(option: str) -> Path:
     return Path(value).resolve()
 
 
+def is_within(path: Path, directory: Path) -> bool:
+    """Return whether ``path`` is inside ``directory`` (or is the directory)."""
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def write_gitdir(path: Path, worktree_dir: Path) -> None:
+    """Atomically write a gitdir reference file."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as temporary_file:
+        temporary_path = Path(temporary_file.name)
+        temporary_file.write(f"gitdir: {worktree_dir}\n")
+    try:
+        temporary_path.replace(path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def create_shadow(argument: str) -> None:
     """Create the requested shadow repository."""
     git_dir_ref = Path(argument).resolve()
@@ -69,6 +93,13 @@ def create_shadow(argument: str) -> None:
     source_config = source_common_dir / "config"
     source_objects = source_common_dir / "objects"
 
+    git_dir = git_dir_ref.with_name(git_dir_ref.name + "_")
+    for output_path in (git_dir_ref, git_dir):
+        if is_within(output_path, source_common_dir):
+            raise ValueError("output paths cannot be inside the source Git directory")
+        if output_path.exists():
+            raise ValueError(f"output path already exists: {output_path}")
+
     # Resolve source state before creating any output paths.
     branch_result = run(
         ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -83,9 +114,51 @@ def create_shadow(argument: str) -> None:
     )
     head = head_result.stdout.strip() if head_result.returncode == 0 else ""
 
-    # The shadow git directory is <git_dir_ref>_.
-    git_dir = git_dir_ref.with_name(git_dir_ref.name + "_")
-    git_dir.mkdir(parents=True, exist_ok=True)
+    git_dir_ref.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f".{git_dir.name}.", dir=git_dir.parent)
+    )
+
+    try:
+        populate_shadow(
+            staging_dir,
+            source_head=source_head,
+            source_config=source_config,
+            source_objects=source_objects,
+            branch=branch,
+            head=head,
+        )
+
+        # Validate the completed repository while it is still staged.
+        staged_ref = staging_dir / "gitdir"
+        write_gitdir(staged_ref, staging_dir / "worktrees" / "current")
+        run(["git", "--git-dir", str(staged_ref), "reset"])
+        staged_ref.unlink()
+
+        staging_dir.replace(git_dir)
+        try:
+            write_gitdir(git_dir_ref, git_dir / "worktrees" / "current")
+        except BaseException:
+            shutil.rmtree(git_dir)
+            raise
+    except BaseException:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise
+
+    print(f"Shadow repository created at {git_dir_ref}")
+
+
+def populate_shadow(
+    git_dir: Path,
+    *,
+    source_head: Path,
+    source_config: Path,
+    source_objects: Path,
+    branch: str,
+    head: str,
+) -> None:
+    """Populate a staged shadow repository directory."""
 
     # Point object alternates to the source repository. An absolute path works
     # regardless of where the git-dir reference is created.
@@ -112,6 +185,34 @@ def create_shadow(argument: str) -> None:
 
     # Copy configuration without giving the shadow access to source remotes.
     shutil.copy2(source_config, git_dir / "config")
+
+    # Includes can reintroduce remotes from files outside the shadow. Remove
+    # the include directives before enumerating and removing direct remotes.
+    include_keys = run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(git_dir / "config"),
+            "--name-only",
+            "--get-regexp",
+            r"^include(if)?\.",
+        ],
+        capture_stdout=True,
+        check=False,
+    ).stdout.splitlines()
+    for key in include_keys:
+        run(
+            [
+                "git",
+                "config",
+                "--file",
+                str(git_dir / "config"),
+                "--unset-all",
+                key,
+            ]
+        )
+
     remotes = run(
         ["git", "--git-dir", str(git_dir), "remote"], capture_stdout=True
     ).stdout.splitlines()
@@ -123,11 +224,6 @@ def create_shadow(argument: str) -> None:
     worktree_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_head, worktree_dir / "HEAD")
     (worktree_dir / "commondir").write_text("../..\n")
-
-    git_dir_ref.write_text(f"gitdir: {worktree_dir}\n")
-    run(["git", "--git-dir", str(git_dir_ref), "reset"])
-
-    print(f"Shadow repository created at {git_dir_ref}")
 
 
 def main(argv: list[str]) -> int:
