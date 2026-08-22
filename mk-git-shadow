@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Python implementation of the original mk-git-shadow shell script.
+"""Create a writable shadow Git repository.
 
 This script creates a *shadow* Git repository that inherits objects from the
 current repository via Git’s *alternates* feature and creates a worktree that
-points back to the current working directory. The behaviour matches the
-original shell script found in ``mk-git-shadow``.
+points back to the current working directory.
 
 Usage::
 
@@ -13,27 +12,19 @@ Usage::
 Where ``<git-dir-ref-file>`` is the path to the file that will contain a
 ``gitdir: <path>`` line pointing to the new worktree.
 
-The script performs the following steps:
-
-1. Validate the argument.
-2. Create a new directory ``<git-dir-ref>_``.
-3. Configure the objects alternates to use the current repository’s objects.
-4. Copy ``HEAD`` and, if present, the current branch reference.
-5. Copy the configuration and remove any remote entries.
-6. Create a worktree that points to the current directory.
-7. Write the gitdir file and reset the repository.
+The source may use loose or packed refs and may itself be a linked worktree.
 """
 
 from __future__ import annotations
 
-import subprocess
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 
 def run(
-    cmd: list[str], *, capture_stdout: bool = False
+    cmd: list[str], *, capture_stdout: bool = False, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
     """Convenience wrapper around :func:`subprocess.run`.
 
@@ -43,69 +34,84 @@ def run(
         Command and arguments to execute.
     capture_stdout:
         If ``True`` the command’s stdout is captured. Stderr remains visible.
+    check:
+        If ``True``, raise an exception when the command fails.
     """
     return subprocess.run(
         cmd,
-        check=True,
+        check=check,
         stdout=subprocess.PIPE if capture_stdout else None,
         text=True,
     )
 
 
-def main(argv: list[str]) -> None:
-    if len(argv) != 1:
-        print(f"Usage: {Path(sys.argv[0]).name} <git-dir-ref-file>", file=sys.stderr)
-        sys.exit(2)
+def git_path(option: str) -> Path:
+    """Return an absolute path reported by ``git rev-parse``."""
+    value = run(
+        ["git", "rev-parse", option], capture_stdout=True
+    ).stdout.strip()
+    return Path(value).resolve()
 
-    git_dir_ref = Path(argv[0]).resolve()
+
+def create_shadow(argument: str) -> None:
+    """Create the requested shadow repository."""
+    git_dir_ref = Path(argument).resolve()
     if git_dir_ref.name == ".git":
-        print("Error: git-dir-ref cannot be .git", file=sys.stderr)
-        sys.exit(2)
+        raise ValueError("git-dir-ref cannot be .git")
+
+    source_worktree = git_path("--show-toplevel")
+    if Path.cwd().resolve() != source_worktree:
+        raise ValueError("run this command from the repository root")
+
+    source_git_dir = git_path("--absolute-git-dir")
+    source_common_dir = git_path("--git-common-dir")
+    source_head = source_git_dir / "HEAD"
+    source_config = source_common_dir / "config"
+    source_objects = source_common_dir / "objects"
+
+    # Resolve source state before creating any output paths.
+    branch_result = run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        capture_stdout=True,
+        check=False,
+    )
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    head_result = run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+        capture_stdout=True,
+        check=False,
+    )
+    head = head_result.stdout.strip() if head_result.returncode == 0 else ""
 
     # The shadow git directory is <git_dir_ref>_.
     git_dir = git_dir_ref.with_name(git_dir_ref.name + "_")
     git_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Point objects alternates to the real .git objects
+    # Point object alternates to the source repository. An absolute path works
+    # regardless of where the git-dir reference is created.
     (git_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
     alternates_file = git_dir / "objects" / "info" / "alternates"
-    alternates_file.write_text("../../.git/objects\n")
+    alternates_file.write_text(f"{source_objects}\n")
 
-    # 2. Copy HEAD
-    shutil.copy2(Path(".git") / "HEAD", git_dir / "HEAD")
+    shutil.copy2(source_head, git_dir / "HEAD")
 
-    # 3. Get current branch
-    branch = run(
-        ["git", "--git-dir", ".git", "branch", "--show-current"],
-        capture_stdout=True,
-    ).stdout.strip()
-
-    # 4. Copy current branch ref if it exists
-    git_dir_ref_head = git_dir / "refs" / "heads"
     # Git requires refs/heads to recognize an otherwise empty repository.
-    # Keep this unconditional so repositories with no commits are supported.
+    git_dir_ref_head = git_dir / "refs" / "heads"
     git_dir_ref_head.mkdir(parents=True, exist_ok=True)
-    if branch:
-        current_ref = Path(".git") / "refs" / "heads" / branch
-        if current_ref.is_file():
-            rev = run(
-                ["git", "--git-dir", ".git", "rev-parse", branch],
-                capture_stdout=True,
-            ).stdout.strip()
-            run(
-                [
-                    "git",
-                    "--git-dir",
-                    str(git_dir),
-                    "update-ref",
-                    f"refs/heads/{branch}",
-                    rev,
-                ]
-            )
+    if branch and head:
+        run(
+            [
+                "git",
+                "--git-dir",
+                str(git_dir),
+                "update-ref",
+                f"refs/heads/{branch}",
+                head,
+            ]
+        )
 
-    # 5. Copy config and remove remotes
-    shutil.copy2(Path(".git") / "config", git_dir / "config")
-    # List remotes and remove them
+    # Copy configuration without giving the shadow access to source remotes.
+    shutil.copy2(source_config, git_dir / "config")
     remotes = run(
         ["git", "--git-dir", str(git_dir), "remote"], capture_stdout=True
     ).stdout.splitlines()
@@ -113,20 +119,40 @@ def main(argv: list[str]) -> None:
         if remote:
             run(["git", "--git-dir", str(git_dir), "remote", "remove", remote])
 
-    # 6. Create worktree for current directory
     worktree_dir = git_dir / "worktrees" / "current"
     worktree_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(Path(".git") / "HEAD", worktree_dir / "HEAD")
+    shutil.copy2(source_head, worktree_dir / "HEAD")
     (worktree_dir / "commondir").write_text("../..\n")
 
-    # 7. Write the gitdir file
     git_dir_ref.write_text(f"gitdir: {worktree_dir}\n")
-
-    # 8. Reset using the new gitdir ref
     run(["git", "--git-dir", str(git_dir_ref), "reset"])
 
     print(f"Shadow repository created at {git_dir_ref}")
 
 
+def main(argv: list[str]) -> int:
+    if len(argv) != 1:
+        print(f"Usage: {Path(sys.argv[0]).name} <git-dir-ref-file>", file=sys.stderr)
+        return 2
+
+    try:
+        create_shadow(argv[0])
+    except ValueError as error:
+        print(f"{Path(sys.argv[0]).name}: {error}", file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError as error:
+        print(
+            f"{Path(sys.argv[0]).name}: command failed with status "
+            f"{error.returncode}: {error.cmd[0]}",
+            file=sys.stderr,
+        )
+        return error.returncode or 1
+    except OSError as error:
+        print(f"{Path(sys.argv[0]).name}: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))
