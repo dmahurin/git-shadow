@@ -8,7 +8,7 @@ original shell script found in ``mk-git-shadow``.
 
 Usage::
 
-    python3 mk-git-shadow.py <git-dir-ref-file>
+    mk-git-shadow <git-dir-ref-file>
 
 Where ``<git-dir-ref-file>`` is the path to the file that will contain a
 ``gitdir: <path>`` line pointing to the new worktree.
@@ -26,32 +26,35 @@ The script performs the following steps:
 
 from __future__ import annotations
 
-import os
-import sys
 import subprocess
-from pathlib import Path
 import shutil
+import sys
+from pathlib import Path
 
 
-def run(cmd: list[str], *, check: bool = True, capture_output: bool = False, **kwargs) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str], *, capture_stdout: bool = False
+) -> subprocess.CompletedProcess[str]:
     """Convenience wrapper around :func:`subprocess.run`.
 
     Parameters
     ----------
     cmd:
         Command and arguments to execute.
-    check:
-        If ``True`` (default) ``CalledProcessError`` is raised on non‑zero
-        returncode.
-    capture_output:
-        If ``True`` the command’s stdout/stderr are captured.
+    capture_stdout:
+        If ``True`` the command’s stdout is captured. Stderr remains visible.
     """
-    return subprocess.run(cmd, check=check, capture_output=capture_output, text=True, **kwargs)
+    return subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.PIPE if capture_stdout else None,
+        text=True,
+    )
 
 
 def main(argv: list[str]) -> None:
     if len(argv) != 1:
-        print("Usage: mk-git-shadow.py <git-dir-ref-file>", file=sys.stderr)
+        print(f"Usage: {Path(sys.argv[0]).name} <git-dir-ref-file>", file=sys.stderr)
         sys.exit(2)
 
     git_dir_ref = Path(argv[0]).resolve()
@@ -72,30 +75,43 @@ def main(argv: list[str]) -> None:
     shutil.copy2(Path(".git") / "HEAD", git_dir / "HEAD")
 
     # 3. Get current branch
-    try:
-        branch = run(["git", "--git-dir", ".git", "branch", "--show-current"], capture_output=True).stdout.strip()
-    except subprocess.CalledProcessError:
-        branch = ""
+    branch = run(
+        ["git", "--git-dir", ".git", "branch", "--show-current"],
+        capture_stdout=True,
+    ).stdout.strip()
 
     # 4. Copy current branch ref if it exists
+    git_dir_ref_head = git_dir / "refs" / "heads"
+    # Git requires refs/heads to recognize an otherwise empty repository.
+    # Keep this unconditional so repositories with no commits are supported.
+    git_dir_ref_head.mkdir(parents=True, exist_ok=True)
     if branch:
         current_ref = Path(".git") / "refs" / "heads" / branch
         if current_ref.is_file():
-            git_dir_ref_head = git_dir / "refs" / "heads"
-            git_dir_ref_head.mkdir(parents=True, exist_ok=True)
-            rev = run(["git", "--git-dir", ".git", "rev-parse", branch], capture_output=True).stdout.strip()
-            run(["git", "--git-dir", str(git_dir), "update-ref", f"refs/heads/{branch}", rev])
+            rev = run(
+                ["git", "--git-dir", ".git", "rev-parse", branch],
+                capture_stdout=True,
+            ).stdout.strip()
+            run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(git_dir),
+                    "update-ref",
+                    f"refs/heads/{branch}",
+                    rev,
+                ]
+            )
 
     # 5. Copy config and remove remotes
     shutil.copy2(Path(".git") / "config", git_dir / "config")
     # List remotes and remove them
-    try:
-        remotes = run(["git", "--git-dir", str(git_dir), "remote"], capture_output=True).stdout.splitlines()
-        for r in remotes:
-            if r:
-                run(["git", "--git-dir", str(git_dir), "remote", "remove", r])
-    except subprocess.CalledProcessError:
-        pass
+    remotes = run(
+        ["git", "--git-dir", str(git_dir), "remote"], capture_stdout=True
+    ).stdout.splitlines()
+    for remote in remotes:
+        if remote:
+            run(["git", "--git-dir", str(git_dir), "remote", "remove", remote])
 
     # 6. Create worktree for current directory
     worktree_dir = git_dir / "worktrees" / "current"
@@ -114,4 +130,3 @@ def main(argv: list[str]) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-
