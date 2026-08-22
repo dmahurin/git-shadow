@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "git-shadow"
+version = "0.1.0"
+description = "Create a writable shadow Git repository backed by another repository's objects"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Don Mahurin", email = "2797413+dmahurin@users.noreply.github.com" },
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dmahurin/git-shadow"
+Repository = "https://github.com/dmahurin/git-shadow"
+
+[tool.setuptools]
+script-files = ["mk-git-shadow"]
